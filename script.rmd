@@ -1,0 +1,821 @@
+---
+title: "Reviews analysis"
+author: "Koroleva T"
+date: "20 12 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Подготовка данных.
+
+```{r echo = F, message = F, warning=F}
+library(readr)
+library(dplyr)
+library(tidytext)
+library(readxl)
+library(stopwords)
+library(tidyr)
+library(plyr)
+library(ggplot2)
+library(wordcloud)
+library(tm)
+library(tidytext)
+library(tidyr)
+library(stringr)
+library(wordcloud)
+library(caret)
+library(quanteda)
+library(cleanNLP)
+library(igraph)
+library(ggraph)
+
+stoplist <- c(stopwords("ru"), "это", "весь", "очень", "ресторан")
+```
+
+###Веганские рестораны.
+
+```{r}
+veglem <- read_excel("~/CH/veg1 (2).xlsx")
+veglem$text = removeNumbers(veglem$text)
+veglem$text = removePunctuation(veglem$text)
+
+text.tmp.veg <- system2("mystem", c("-c", "-l", "-d"), input=veglem$text, stdout=TRUE)
+text.lem <- stringr::str_replace_all(text.tmp.veg, "\\{([^}]+?)([?]+)?\\}", "\\1")
+text.coded <- NULL
+text.df <- cbind(text.coded, text.lem)
+veglem <- cbind(veglem, text.df)
+
+veglem <- mutate(veglem, line = 1:nrow(veglem))
+veglem <- dplyr::select(veglem, line, type, name_rest, text, text.lem)
+```
+
+```{r}
+veglem$text.lem <- as.character(veglem$text.lem)
+
+veg_long <- veglem %>%
+    unnest_tokens(word, text.lem) %>%
+    filter(! word %in% stoplist) %>%
+    filter(! str_detect(word, "[0-9]+"))
+
+veg.dtm <- veg_long %>%
+    dplyr::count(line, word)
+
+names(veg.dtm)
+```
+
+###Кавказские рестораны.
+
+```{r}
+kavlem <- read_excel("~/CH/kav1 (2).xlsx")
+kavlem$text = removeNumbers(kavlem$text)
+kavlem$text = removePunctuation(kavlem$text)
+
+
+text.tmp.kav <- system2("mystem", c("-c", "-l", "-d"), input=kavlem$text, stdout=TRUE)
+text.lem <- stringr::str_replace_all(text.tmp.kav, "\\{([^}]+?)([?]+)?\\}", "\\1")
+text.coded <- NULL
+text.df <- cbind(text.coded, text.lem)
+kavlem <- cbind(kavlem, text.df)
+
+kavlem <- mutate(kavlem, line = 1:nrow(kavlem))
+kavlem <- dplyr::select(kavlem, line, type, name_rest, text, text.lem)
+```
+
+```{r}
+kavlem$text.lem <- as.character(kavlem$text.lem)
+
+kav_long <- kavlem %>%
+    unnest_tokens(word, text.lem) %>%
+    filter(! word %in% stoplist) %>%
+    filter(! str_detect(word, "[0-9]+"))
+
+kav.dtm <- kav_long %>%
+    dplyr::count(line, word)
+
+names(kav.dtm)
+```
+
+```{r}
+rest <- rbind(kavlem, veglem)
+```
+
+
+#Log-likelihood
+
+```{r}
+
+type.lemmas.or <- bind_rows(kav_long, veg_long) %>% 
+  dplyr::count(word, type) %>%
+    spread(type, n, fill = 0) %>%
+    filter("kav" > 10 | "veg" > 10)
+```
+
+```{r}
+### Создаем функцию для рассчета логарифмической вероятности (log-likelihood: G-squared)
+
+g2 = function(a, b) {
+  c = sum(a)
+  d = sum(b)
+  E1 = c * ((a + b) / (c + d))
+  E2 = d * ((a + b) / (c + d))
+  return(2*((a*log(a/E1+1e-7)) + (b*log(b/E2+1e-7))))
+}
+```
+
+
+```{r}
+library(scales)
+
+ggplot(type.lemmas.or, aes(veg, kav)) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  geom_abline(color = "red")
+```
+
+```{r}
+type.g2.or <- type.lemmas.or %>% 
+    mutate(g2=g2(veg, kav)) %>%
+    arrange(desc(g2)) %>%
+    mutate(g2 = round(g2, 2))
+```
+
+```{r}
+# Создаем функцию расчета Log odds ratio
+
+logratio <- function(a, b) {
+    return(log2((a/sum(a)/(b/sum(b)))))
+}
+```
+
+```{r}
+# Рассчитываем Log Ratio
+
+type.lr.or <- type.g2.or %>%
+    mutate(logratio = logratio(kav, veg))
+```
+
+```{r}
+type.lr.or %>%
+    arrange(abs(logratio))
+```
+
+```{r}
+type.lr.or %>%
+    filter(veg > 0 & kav > 0) %>%
+    group_by(logratio < 0) %>%
+    top_n(15, abs(logratio)) %>%
+    ungroup()
+```
+
+### Нарисуем график:
+
+```{r}
+type.lr.or %>%
+    filter(veg > 0 & kav > 0) %>%
+    group_by(logratio < 0) %>%
+    top_n(15, abs(logratio)) %>%
+    ungroup() %>%
+    mutate(word = reorder(word, logratio)) %>%
+    ggplot(aes(word, logratio, fill = logratio > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    ylab("log odds ratio (kav/veg)") +
+    scale_fill_discrete(name = "", labels = c("veg", "kav"))
+
+```
+
+
+#Collocations
+
+```{r}
+rest <- rbind(kavlem, veglem)
+stoplist <- c(stopwords("ru"), "это", "весь", "очень", "ресторан", "спасибо", "отзыв", "день")
+```
+
+
+```{r}
+pn.skipgrams = rest %>% 
+  unnest_tokens(skipgram, text.lem, token = "skip_ngrams", n = 2, k = 3) %>%
+    select(type, line, skipgram)
+```
+
+```{r}
+pn.skipfiltered <- pn.skipgrams %>% 
+  separate(skipgram, c("word1", "word2"), sep = " ") %>%
+  filter(!is.na(word2) & ! is.na(word1)) %>% 
+  filter(!word1 %in% stoplist) %>% 
+  filter(!word2 %in% stoplist) 
+pn.skipfiltered %>% select(word1, word2) %>% head
+```
+
+```{r}
+
+pn.skipfreq <- pn.skipfiltered %>% 
+  dplyr::count(word1, word2,type, sort = TRUE)
+pn.skipfreq
+```
+
+```{r}
+pn.unifreq <- rest %>%
+    unnest_tokens(word, text.lem) %>%
+    filter(!word %in% stoplist) %>%
+    dplyr::count(word, sort = TRUE)
+pn.unifreq
+```
+
+```{r}
+pn.freqjoined <- pn.skipfreq %>%
+    left_join(pn.unifreq, by = c("word1" = "word"), suffix = c(".xy", ".x")) %>%
+    left_join(pn.unifreq, by = c("word2" = "word"), suffix = c(".xy", ".y")) %>%
+    mutate(n.y = n) %>% select(-n)
+
+pn.freqjoined
+```
+
+```{r}
+logDice <- function(f.xy, f.x, f.y) {
+    return(14 + log2( (2 * f.xy) / (f.x + f.y) ))
+}
+```
+
+```{r}
+pn.logdice <- pn.freqjoined %>%
+    mutate(logDice = logDice(n.xy, n.x, n.y)) %>%
+    arrange(-logDice)
+pn.logdice
+```
+
+```{r}
+pn.logdice %>%
+    filter(n.xy > 50)
+```
+
+
+```{r}
+logdice.graph <- pn.logdice %>%
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice.graph
+```
+
+```{r}
+ggraph(logdice.graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+```{r}
+logdice.graph <- pn.logdice %>%
+  filter(!word1 == word2) %>%
+  filter(!word1 == "вкусный" & ! word2 == "вкусный") %>%
+  filter(!word1 == "хороший" & ! word2 == "хороший") %>%
+  filter(!word1 == "блюдо" & ! word2 == "блюдо") %>% 
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice.graph
+```
+
+```{r}
+ggraph(logdice.graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+##**Коллокации с наиболее часто встречающимися словами среди посетителей веганских и кавказских ресторанов: атмосфера,еда, кухня,персонал,обслуживание**
+```{r}
+atm <-pn.logdice %>%
+    filter(word1 == "атмосфера"|word2 == "атмосфера")
+```
+
+#среди кавказских и веганских ресторанов
+```{r}
+ atm %>% 
+filter(word2 == "атмосфера") %>%
+dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+group_by(type) %>%
+slice(1:200)
+```
+#часто встречающиеся слова со словом "атмосфера" среди отзывов посетителей веганской кухни
+```{r}
+ atm %>% 
+  filter(type == "veg") %>% 
+  filter(word2 == "атмосфера") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+#часто встречающиеся слова со словом "атмосфера" среди отзывов посетителей кавказской кухни
+```{r}
+atm %>% 
+  filter(type == "kav") %>% 
+  filter(word2 == "атмосфера") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+
+#co-occurance со словом "атмосфера" среди посетителей веганской кухни
+```{r}
+library(igraph)
+library(stringr)
+library(ggraph)
+
+
+logdice50.graph <- atm %>%
+  filter(type == "veg") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph
+```
+#co-occurance со словом "атмосфера" среди отзывов посетителей национальных ресторанов
+```{r}
+library(igraph)
+library(stringr)
+library(ggraph)
+
+
+logdice50.graph1 <- atm %>%
+  filter(type == "kav") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph1
+```
+#визуализация co-occurance среди слов посетителей веганских ресторанов
+```{r}
+ggraph(logdice50.graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+#визуализация co-occurance среди слов посетителей национальных ресторанов
+```{r}
+ggraph(logdice50.graph1, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+#коллокации со словом "цена"
+```{r}
+pr <-pn.logdice %>%
+    filter(word1 == "цена"|word2 == "цена")
+```
+#среди посетителей национальных и веганских ресторанов
+```{r}
+ pr %>% 
+  filter(word2 == "цена") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+group_by(type) %>%
+slice(1:200)
+```
+
+```{r}
+pr %>% 
+  filter(type == "veg") %>% 
+  filter(word2 == "цена") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+
+ pr %>% 
+  filter(type == "kav") %>% 
+  filter(word2 == "цена") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+logdice50.graph2 <- pr %>%
+  filter(type == "veg") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph2
+```
+
+```{r}
+logdice50.graph3 <- pr %>%
+  filter(type == "kav") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph3
+```
+#визуализация co-occurance слов среди посетителей веганских ресторанов
+```{r}
+ggraph(logdice50.graph2, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+#визуализация co-occurance слов среди посетителей национальных ресторанов
+```{r}
+ggraph(logdice50.graph3, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+#коллокации со словом "обслуживание"
+
+```{r}
+serv <- pn.logdice %>%
+    filter(word1 == "обслуживане"|word2 == "обслуживание")
+```
+
+```{r}
+serv %>% 
+  filter(word2 == "обслуживание") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+group_by(type) %>%
+slice(1:200)
+```
+
+```{r}
+serv%>% 
+  filter(type == "veg") %>% 
+  filter(word2 == "обслуживание") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+
+serv %>% 
+  filter(type == "kav") %>% 
+  filter(word2 == "обслуживание") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+logdice50.graph4 <- serv %>%
+  filter(type == "veg") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph4
+```
+
+```{r}
+logdice50.graph5 <- serv %>%
+  filter(type == "kav") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph5
+```
+
+```{r}
+ggraph(logdice50.graph4, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+```{r}
+ggraph(logdice50.graph5, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+
+#коллокации со словом "еда"
+```{r}
+fo <-pn.logdice %>%
+    filter(word1 == "еда"|word2 == "еда")
+```
+#среди посетителей национальных и веганских ресторанов
+```{r}
+fo %>% 
+  filter(word2 == "еда") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+group_by(type) %>%
+slice(1:200)
+```
+#среди посетителей веганских ресторанов
+```{r}
+ fo %>% 
+  filter(type == "veg") %>% 
+  filter(word2 == "еда") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+#среди посетителей национальных ресторанов
+```{r}
+
+fo %>% 
+  filter(type == "kav") %>% 
+  filter(word2 == "еда") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+logdice50.graph6 <- fo %>%
+  filter(type == "veg") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph6
+```
+
+```{r}
+logdice50.graph7 <- fo %>%
+  filter(type == "kav") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph7
+```
+
+```{r}
+ggraph(logdice50.graph6, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+```{r}
+ggraph(logdice50.graph7, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+
+#коллокации со словом"полезный" среди отзывов посетителей веганских и национальнх ресторанов
+```{r}
+ts <- pn.logdice %>%
+    filter(word1 == "полезный"|word2 == "полезный")
+```
+
+#среди отзывов посетителей веганских и национальных ресторанов
+```{r}
+ ts %>% 
+  filter(word2 == "полезный") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+group_by(type) %>%
+slice(1:200)
+```
+#среди отзывов веганских ресторанов
+```{r}
+ ts %>% 
+  filter(type == "veg") %>% 
+  filter(word2 == "полезный") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+#среди отзывов посетителей национальных ресторанов
+```{r}
+
+ ts %>% 
+  filter(type == "kav") %>% 
+  filter(word2 == "полезный") %>%
+  dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+logdice50.graph10 <- ts %>%
+  filter(type == "veg") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph10
+```
+
+```{r}
+logdice50.graph11 <- ts%>%
+  filter(type == "kav") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph11
+```
+
+```{r}
+ggraph(logdice50.graph10, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+```{r}
+ggraph(logdice50.graph11, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+
+
+
+
+#Коллокации со словом "настоящий"
+```{r}
+nat <- pn.logdice %>%
+    filter(word1 == "настоящий"|word2 == "настоящий")
+```
+
+#среди отзывов посетителей веганских и национальных ресторанов
+```{r}
+ nat %>% 
+  filter(word2 == "настоящий") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+group_by(type) %>%
+slice(1:200)
+```
+#среди отзывов веганских ресторанов
+```{r}
+ nat%>% 
+  filter(type == "veg") %>% 
+  filter(word2 == "настоящий") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+#среди отзывов посетителей национальных ресторанов
+```{r}
+
+nat %>% 
+  filter(type == "kav") %>% 
+  filter(word2 == "настоящий") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+logdice50.graph12 <- nat %>%
+  filter(type == "veg") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph12
+```
+
+```{r}
+logdice50.graph13 <- nat%>%
+  filter(type == "kav") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph13
+```
+
+```{r}
+ggraph(logdice50.graph12, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+```{r}
+ggraph(logdice50.graph13, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+
+
+
+
+
+
+#Коллокации со словом "соотношение" среди отзывов посетителей веганских и национальных ресторанов
+```{r}
+en <- pn.logdice %>%
+    filter(word1 == "соотношение"|word2 == "соотношение")
+```
+
+#среди отзывов посетителей веганских и национальных ресторанов
+```{r}
+ en %>% 
+  filter(word2 == "соотношение") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+group_by(type) %>%
+slice(1:200)
+```
+#среди отзывов веганских ресторанов
+```{r}
+ en %>% 
+  filter(type == "veg") %>% 
+  filter(word2 == "соотношение") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+#среди отзывов посетителей национальных ресторанов
+```{r}
+
+en %>% 
+  filter(type == "kav") %>% 
+  filter(word2 == "соотношение") %>%
+ dplyr::count(type, word1, n.xy, sort=TRUE) %>%
+slice(1:200)
+```
+
+```{r}
+logdice50.graph14 <- en %>%
+  filter(type == "veg") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph14
+```
+
+```{r}
+logdice50.graph15 <- en %>%
+  filter(type == "kav") %>% 
+  filter(!word1 == word2) %>%
+  filter(!str_detect(word1, "[0-9,.]+")) %>%
+  filter(!str_detect(word2, "[0-9,.]+")) %>%
+  arrange(desc(n.x + n.y)) %>%
+  slice(1:200) %>%
+  graph_from_data_frame(directed = FALSE)
+logdice50.graph15
+```
+
+```{r}
+ggraph(logdice50.graph14, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+```{r}
+ggraph(logdice50.graph15, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = logDice), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_label(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
